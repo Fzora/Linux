@@ -1,0 +1,351 @@
+#!/bin/bash
+#
+# Remarques :
+# * Le programme est un peu paranoiaque, par exemple sur une base vide
+# il n'accepte que "add 1" alors qu'on pourrait considérer que
+# add <n'importe quelle nombre> devrait rajouter une tâche à la fin de
+# la liste.
+#
+# * Le programme n'a pas besoin d'être sourcé : il suffit de le
+# sauver sous le nom "todo" (et mode u+rwx) et de rajouter sa
+# localisation dans le PATH : PATH=$PATH:`pwd` par exmple.
+#
+# Faire un source est souhaitable si on ne salit pas son #
+# environnement avec pleins de variables, ce qui sera inévitablement
+# le cas si on défini des fonctions annexes pour faciliter la
+# lisibilité du code.
+# Si on veut *absolumet sourcer* ce fichier, il sufit de remplacer les
+# lignes "exit" par return et ne pas appeller init et fixer la valeur
+# de PROGRAM à todo.
+#
+# * Le programme peut être simplifié et accéléré en utilisant la
+# commande ed : (printf "1i\ndescriptif tâche n\n.\nw\nq") | ed -s
+# fichier pour ajouter une tâche au début ($a pour la fin et <n> pour
+# n'importe où dans le fichier).
+###################################
+
+PATH=/bin:/usr/bin
+
+# Le programme qui numérote les lignes
+# cat -n peut peut-être aussi faire l'affaire
+NL=nl
+
+# Oû se trouve la base
+TACHES=$HOME/.todo_list
+
+# Variable globale, à la C
+ARGV="$@"
+ARGC="$#"
+
+# Le nom du programme moins le chemin (./ par exemple)
+PROGRAM=`basename $0`
+
+# Le premier argument est le nom de la commande, par exemple add, list, etc.
+COMMAND=$1
+
+## Diverses variables
+# Répertoire des fichier temporaires
+TEMPDIR=/tmp
+
+# On les noms des fichiers sont uniques, basées sur le PID
+TEMP1=$TEMPDIR/todotempa$$
+TEMP2=$TEMPDIR/todotempb$$
+
+# La liste des signaux à trapper, 2=SIGINT=control-c
+SIGNALS="2"
+
+## Début du code
+# Parse des arguments à la commande todo
+
+## todo est la fonction principale. Elle vérifie sommairement le
+# nombre de paramètres et appelle la fonction dédiée.
+function todo() {
+    if [[ $ARGC == 0 ]]; then
+	usage;
+	cleanup_and_exit;
+    fi
+    
+    # on est sur qu'il y a un paramètre
+    case $COMMAND in
+	"list") list_tasks;;
+	"done") done_task;;
+	"add") add_task;;
+	# Fonctions supplémentaires
+	"search") search_task;;
+	"demo") demo_tasks;;
+	"check") check_tasks;;
+	*) echo "Commande $COMMAND inconnue" >&2;
+	   usage;;
+    esac
+    exit 0
+}
+
+
+## Fonction accessoires
+# Ignore le control-c (signal 2)
+function CRITICAL_START() {
+    trap "" $SIGNALS
+}
+
+# Restore le comportement par défaut du control-c
+function CRITICAL_END() {
+    trap $SIGNALS
+}
+
+# Affiche "l'usage" du programme
+function usage() {
+    echo $PROGRAM '[list|done|add|check|demo] [paramètre]' >&2
+    exit 0
+}
+
+
+# Efface les fichiers temporaires
+function cleanup() {
+    CRITICAL_START
+    rm -f $TEMP1 $TEMP2
+    CRITICAL_END
+}
+
+
+# Efface les fichiers temporaires et termine le programme
+cleanup_and_exit() {
+    cleanup
+    exit 0
+}
+
+
+# Retourne le nombre de tâche dans la base
+# Fait appel à la commande "wc -l" (nombre de lignes)
+function n_tasks() {
+    CRITICAL_START
+    set -- `wc -l $TACHES`
+    CRITICAL_END
+    echo $1
+    return 0
+}
+
+
+# Vérifie que le le nombre de tâches passé en argument à une fonction
+# est le bon.
+# valid_task_number(action, n) avec action=done|add
+function valid_task_number() {
+    local action=$1
+    local tasknum=$2
+
+    # Dans tous les cas il faut un numéro de tâche
+    if [[ -z $tasknum && $action != "list" ]]; then
+	echo "Numéro de tâche doit être un nombre positif" >&2
+	cleanup_and_exit
+    fi
+
+    if [[ $tasknum < 1 ]]; then
+	echo "Numéro de tâche doit être un nombre positif" >&2
+	cleanup_and_exit
+    fi
+
+    local ntasks=`n_tasks`
+
+    # Base vide et action done
+    if [[ ($ntasks -eq 0) && ($action == "done") ]]; then
+	echo "done: base vide, pas de tâche à supprimer" >&2
+	cleanup_and_exit
+    fi
+
+    # base vide et action add
+    if [[ (($ntasks -eq 0) && ($action == "add")) && ($tasknum != 1) ]]; then
+	echo "add: Base vide, seule la tâche numéro 1 peut être ajoutée" >&2
+	cleanup_and_exit
+    fi
+
+    # done entre 1 et le nombre max de tâches dans la base
+    if [[ ($action == "done") && ($tasknum > $ntasks ) ]]; then
+	echo "done: le numéro de tâche doit être entre 1 et $ntasks" >&2
+	cleanup_and_exit
+    fi
+
+    # add entre 1 et le nombre de tâche dans la base + 1
+    if [[ ($action == "done")
+	  && ( ($tasknum > 1) && ($tasknum < $(( $ntasks + 2 )) ) ) ]]; then
+	echo "done: le numéro de tâche doit être entre 1 et $ntasks" >&2
+	cleanup_and_exit
+    fi
+}
+
+
+# Liste les taches
+function list_tasks() {
+    if [[ ! -s $TACHES ]]; then
+	echo "Liste de tâches vide !"
+	exit 0;
+    fi
+    $NL $TACHES
+}
+
+
+# Permet d'effacer d'un coup toutes les tâches
+function reset_tasks() {
+    if [[ ! -s $TACHES ]]; then
+	echo "Base des tâches déjà vide."
+	return 0;
+    fi
+    n=`n_tasks`
+    echo -n "êtes vous sûr de vouloir effacer toutes les $n tâches ? (y/N) "
+    read answer
+    case x$answer in
+	xy|xY|xo|XO) > $TACHES
+	       echo "Base remise à 0"
+	       return 0;;
+	*) echo "Base intouchée."
+	   return 0;;
+    esac
+}
+
+
+# Vérifie que la base ne contient pas des lignes vides
+# Si oui, les supprime
+# N.B : ne doit pas arriver
+function check_tasks() {
+    local empty_line_regexp="^$"
+    
+    egrep -nE $empty_line_regexp $TACHES > $TEMP1
+    if (( $? == 0 )); then
+	echo "Des tâches ont un nom nul/invalide"
+	cat $TEMP1
+	echo "Suppression de ces tâches"
+	grep -v -E $empty_line_regexp $TACHES > $TEMP1
+	CRITICAL_START
+	mv $TEMP1 $TACHES
+	CRITICAL_END
+    fi
+    cleanup_and_exit
+}
+
+
+# Cherche toutes les tâches qui contiennent un ou des mots clefs
+function search_task() {
+    set -- $ARGV
+    shift
+    local pattern=$*
+
+    $NL $TACHES | grep -iE "$pattern"
+    if (( $? == 1 )); then
+	echo "Aucune tâche contenant \"$pattern\" trouvée" >&2
+    fi
+    exit $?
+}
+
+
+# Ajoute une tâche
+function add_task() {
+    set -- $ARGV
+    # Le numéro de la tâche
+    local n=$2
+    # On saute 2 arguments
+    shift
+    shift
+    # La nom de la nouvelle tâche
+    local task=$*
+
+    if [[ x$task = "x" ]]; then
+	echo "add: le descriptif de la tâche ne peut être vide"
+	cleanup_and_exit
+    fi
+    valid_task_number "add" $n
+
+    # La première tâche à droit à un traitement spécial
+    if (( $n == 1 )); then
+	echo $task > $TEMP1
+	cat $TEMP1 $TACHES > $TEMP2
+	CRITICAL_START
+	mv $TEMP2 $TACHES
+	CRITICAL_END
+	cleanup
+	echo "Tâche $n \"$task\" ajoutée avec succès"
+	exit 0
+    fi
+
+    # Quand on ajoute une tâche au milieu d'une autre
+    local total_tasks=`n_tasks`
+    head -$(( $n - 1 )) $TACHES > $TEMP1
+    echo $task >> $TEMP1
+    tail -$(( $total_tasks + 1 - $n )) $TACHES >> $TEMP1
+    CRITICAL_START
+    mv $TEMP1 $TACHES
+    CRITICAL_END
+    cleanup
+    echo "Tâche $n \"$task\" ajoutée avec succès"
+    exit 0    
+}
+
+
+# Supprime une tâche
+function done_task() {
+    set -- $ARGV
+    local n=$2
+    local task
+
+    valid_task_number "done" $n
+    local total_tasks=`n_tasks`
+    
+    # C'est la première
+    if (( $n == 1 )); then
+	# Le nom de la tâche est la première ligne
+	task=`head -1 $TACHES`
+	tail -$(( $total_tasks - 1 )) $TACHES >> $TEMP1
+	CRITICAL_START
+	mv $TEMP1 $TACHES
+	CRITICAL_END
+	# pas necessaire
+	cleanup
+	echo "Tâche $n \"$task\" est faite !"
+	exit 0
+    fi
+
+    # C'est une ligne autre que la première
+    # head pour prendre les premières lignes
+    head -$(( $n - 1 )) $TACHES > $TEMP1
+    # La tâche à supprimer est à la ligne head + 1
+    task=`tail -$(( $total_tasks + 1 - $n )) $TACHES | head -1`
+    # Les tâches suivantes
+    tail -$(( $total_tasks - $n )) $TACHES >> $TEMP1
+    CRITICAL_START
+    mv $TEMP1 $TACHES
+    CRITICAL_END
+    cleanup
+    echo "Tâche $n \"$task\" est faite !"
+    exit 0    
+}
+
+
+# Créer une base avec 5 items définis en dur
+function demo_tasks() {
+    # On a une fonction qui met la base à 0
+    reset_tasks
+    # Puis on la charge avec des données fixes
+    CRITICAL_START
+    cat <<EOF >> $TACHES
+tache numero 1
+tache numero 2
+tache numero 3
+tache numero 4
+tache numero 5
+EOF
+    CRITICAL_END
+    echo "Base initialisée avec `n_tasks` tâches"
+}
+
+
+# Initialisation
+function init() {
+    set -- $ARGV
+    # Si on a pas de fichier base de données, on le crée, vide.
+    if [[ ! -f $TACHES ]]; then
+	> $TACHES
+	# lecture que par l'utilisateur
+	chmod 600 $TACHES
+    fi
+}
+
+# début du script
+init
+todo
